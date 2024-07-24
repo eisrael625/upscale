@@ -1,0 +1,301 @@
+
+//CODE FOR UPSCALE using an ESP32, Board: ESP32 Dev Model. For any questions email eisrael625@gmail.com
+///LOOK AT LINES 61 and 62 to input the default weight unit (LBS/KGS) and the wheelchair weight. This can also be inputted through Bluetooth App
+
+#include "BluetoothSerial.h" //ESP32 Bluetooth Library
+#include "HX711.h" // Library to read the load sensors
+#include <Preferences.h> //Library that allows ESP32 to save data even when power turned off
+
+
+// init Class:
+BluetoothSerial ESP_BT;
+#define calibration_factor -10050.0 //This value is obtained using the SparkFun_HX711_Calibration sketch. If the scale is consistent but not accurate, adjust as needed
+
+#define LOADCELL_DOUT_PIN  5
+#define LOADCELL_SCK_PIN  18
+
+HX711 scale;
+Preferences preferences;
+
+
+int weightMode = 0;
+int wheelchairWeight = 0;
+float weight = 0.0;
+float prevWeight = 0.0;
+int counter = 0;
+int sleepCounter = 0;
+float  addedWeights = 0;
+float  numSamplings = 0;
+float avgWeight = 0;
+
+#include <Wire.h> 
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27,20,4);  // set the LCD address to 0x27 for a 16 chars and 2 line display
+
+
+
+void setup() {
+  Serial.begin(19200);
+  ESP_BT.begin("UPSCALE");        // Name of your Bluetooth interface -> will show up on your phone
+  pinMode(19, OUTPUT);
+  digitalWrite(19, LOW);
+
+  Serial.println("UPSCALE BY TOM!!!");
+
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  scale.set_scale(calibration_factor); //This value is obtained by using the SparkFun_HX711_Calibration sketch
+  scale.tare(); //Assuming there is no weight on the scale at start up, reset the scale to 0
+
+  Serial.println("Readings:");
+  lcd.init();                      // initialize the lcd 
+  lcd.init();
+  lcd.backlight();
+  lcd.setCursor(0, 0);
+  lcd.print("Ready                    ");
+  // Initialize Preferences
+  preferences.begin("scale", false);
+
+  // Retrieve stored values
+  //KG = 0, LBS = 1
+  ///IMPORTANT!!!!!!! This allows programmer to set the default units of weight and wheelchair weight.
+  weightMode = preferences.getInt("weightMode", 0); // if pounds is primary unit, replace 0 with 1 to make it default to pounds
+  wheelchairWeight = preferences.getInt("wheelchair", 0); // if weight of wheelchair is known, replace 0 with weight in lbs/kgs based on above.
+   ///IMPORTANT!!!!!!!
+//This is storing values in local memory so that after data is sent via the app, it is saved in the ESP32. If never recieved data, it will default to KG and 0.0 KG chair
+  Serial.println(weightMode);
+  Serial.println(wheelchairWeight);
+
+  if (wheelchairWeight != 0)
+  {
+    if (weightMode == 0) // IF KG mode
+    {
+      lcd.setCursor(0, 1); //set LCD second line
+      lcd.print("Chair: ");
+      lcd.print(wheelchairWeight);
+      lcd.print(" kgs     ");
+    }
+    else {
+      lcd.setCursor(0, 1);
+      lcd.print("Chair: ");
+      lcd.print(wheelchairWeight);
+      lcd.print(" lbs     ");
+    }
+  }
+
+}
+
+void loop() {
+
+  weight = scale.get_units();
+
+
+
+  if (sleepCounter >= 100 && weight > 2) {
+        lcd.display();
+        lcd.backlight();
+    sleepCounter = 0;
+
+  }
+  if (weight < -10 || weight > 500)
+  {
+    scale.tare(); //Assuming there is no weight on the scale at start up, reset the scale to 0
+
+    lcd.setCursor(0, 0);
+    lcd.print("Ready           ");
+
+    // Print a message to the LCD
+  }
+  else if (abs(weight - prevWeight) > .7) { //if weight is changing
+    Serial.print("CHANGE");
+    sleepCounter = 0; //not sleeping
+    //  lcd.display();// display on
+    addedWeights = 0;
+    numSamplings = 0;
+
+
+    prevWeight = weight;
+
+    if (weightMode == 0)
+    {
+      if ( weight >= wheelchairWeight * 2.2) {
+        lcd.setCursor(0, 0);
+        lcd.print(weight  * 0.453592 - wheelchairWeight , 1);
+        lcd.print(" kgs           ");
+      }
+      else {
+        lcd.setCursor(0, 0);
+        lcd.print("Ready                 ");
+      }
+    }
+    else {
+      if ( weight >= wheelchairWeight ) {
+        lcd.setCursor(0, 0);
+        lcd.print(weight - wheelchairWeight, 1);
+        lcd.print(" lbs           ");
+      }
+      else {
+        lcd.setCursor(0, 0);
+        lcd.print("Ready                 ");
+      }
+    }
+
+
+
+
+    counter = 0;
+  }
+  else if (weight < 10) {
+    sleepCounter++;
+    if (sleepCounter >= 100) {
+
+            lcd.noBacklight();
+            lcd.noDisplay();
+    }
+    else if (sleepCounter >= 30 && weight > .3)
+    {
+      scale.tare();
+      Serial.println("TARE");
+      lcd.setCursor(0, 0);
+      lcd.print("Ready               ");
+    }
+
+    else if (sleepCounter >= 30)
+    {
+
+      lcd.setCursor(0, 0);
+      lcd.print("Ready               ");
+    }
+
+  }
+
+  else if (weight >= 10) { //if weight is more than 5lbs
+    counter++; // increase count
+    addedWeights = addedWeights + weight;
+    numSamplings++;
+
+    if (counter >= 50) { //if stable
+      avgWeight = addedWeights / numSamplings;
+
+
+      if (weightMode == 0)
+      {
+        if ( avgWeight >= 2.2 * wheelchairWeight) {
+          lcd.setCursor(0, 0);
+          lcd.print(avgWeight * 0.453592 - wheelchairWeight, 1);
+          lcd.print(" kgs  LOCK      ");
+        }
+        else {
+          lcd.setCursor(0, 0);
+          lcd.print("Try Again");
+        }
+      }
+      else {
+        if ( avgWeight >=  wheelchairWeight) {
+          lcd.setCursor(0, 0);
+          lcd.print(avgWeight - wheelchairWeight, 1);
+          lcd.print(" lbs  LOCK       ");
+        }
+        else {
+          lcd.setCursor(0, 0);
+          lcd.print("Try Again");
+        }
+      }
+      digitalWrite(19, HIGH); // buzzer on
+      delay(600);
+      digitalWrite(19, LOW); // buzzer off
+
+      if (weightMode == 0)
+      {
+        ESP_BT.print(avgWeight * 0.453592 - wheelchairWeight, 1);
+      }
+      else {
+        ESP_BT.print(avgWeight - wheelchairWeight, 1);
+      }
+      delay(15000);
+
+
+
+
+
+
+
+      prevWeight = 0;
+      weight = 0;
+      counter = 0;
+      sleepCounter = 0;
+      addedWeights = 0;
+      numSamplings = 0;
+      avgWeight = 0;
+      delay(500);
+    }
+  }
+
+
+  // -------------------- Receive Bluetooth signal ----------------------
+  if (ESP_BT.available())
+  {
+    String incoming = ESP_BT.readString(); //Read what we receive and store in "incoming"
+    if (incoming.indexOf("kg") != -1) {
+      weightMode = 0;
+      preferences.putInt("weightMode", weightMode);
+      Serial.println("KG MODE");
+
+      lcd.setCursor(0, 1);
+      lcd.print("Chair: ");
+      lcd.print(wheelchairWeight, 1);
+      lcd.print(" kgs       ");
+    }
+    else if (incoming.indexOf("lb")) {
+      weightMode = 1;
+      preferences.putInt("weightMode", weightMode);
+      Serial.println("LB MODE");
+      lcd.setCursor(0, 1);
+      lcd.print("Chair: ");
+      lcd.print(wheelchairWeight, 1);
+      lcd.print(" lbs      ");
+    }
+    if (incoming != "lb" && incoming != "kg") {
+      Serial.print("Incoming: ");
+      Serial.print(incoming);
+      Serial.println();
+      wheelchairWeight = atof(incoming.c_str());
+      Serial.print("Wheelchair weight: ");
+      Serial.println(wheelchairWeight);
+      preferences.putInt("wheelchair", wheelchairWeight);
+
+      if (weightMode == 0 )
+      {
+
+        lcd.setCursor(0, 1);
+        lcd.print("Chair: ");
+        lcd.print(wheelchairWeight, 1);
+        lcd.print(" kgs        ");
+      }
+      else {
+        lcd.setCursor(0, 1);
+        lcd.print("Chair: ");
+        lcd.print(wheelchairWeight, 1);
+        lcd.print(" lbs         ");
+      }
+
+      if (wheelchairWeight < .5) {
+        lcd.setCursor(0, 1);
+        lcd.print("                          ");
+      }
+
+    }
+
+
+  }
+  Serial.print("Reading with wheelchair minus: ");
+  Serial.print(weight , 1); //scale.get_units() returns a float
+  Serial.print(" lbs"); //You can change this to kg but you'll need to refactor the calibration_factor
+  Serial.println();
+}
+
+float roundToOneDecimal(float number) {
+  // Multiply the number by 10, add 0.5, and then cast to int to truncate the decimal part
+  int temp = (int)(number * 10 + 0.5);
+  // Divide by 10.0 to get the number rounded to one decimal place
+  return temp / 10.0;
+}
